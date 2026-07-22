@@ -22,8 +22,71 @@ This repository demonstrates how to:
 .
 ├── main.py              # Your Python function code
 ├── requirements.txt     # Python dependencies
+├── azure-pipelines.yml  # Azure DevOps CI/CD pipeline (see below)
 └── README.md           # This file
 ```
+
+## CI/CD Pipeline (Azure DevOps)
+
+This repo includes `azure-pipelines.yml`, which automates everything in "Step 2: Deploy the Function" below. Every push to `main` validates and redeploys the function; every pull request into `main` is validated only (no deploy). Once it's set up, you no longer need to run `gcloud functions deploy` by hand.
+
+### What it does
+
+The pipeline has two stages:
+
+1. **Validate** (runs on every PR and on `main`)
+   - Installs `requirements.txt`
+   - Byte-compiles `main.py` (`python -m py_compile`) to catch syntax errors before deploying
+
+2. **Deploy** (runs only on pushes to `main`, after Validate passes)
+   - Downloads the GCP service account key from Azure DevOps' Secure Files (never committed to the repo or written to logs)
+   - Installs the `gcloud` CLI on the build agent
+   - Authenticates with `gcloud auth activate-service-account`
+   - Runs `gcloud functions deploy` as a **Gen2** function with `--ingress-settings=internal-only` and `--no-allow-unauthenticated`, matching the security posture described in this README
+   - Passes `SHARED_DRIVE_FOLDER` and `SHARED_DRIVE_ID` via `--set-env-vars`, sourced live from an Azure DevOps variable group — so changing those values in Azure DevOps and re-running the pipeline is enough to update the deployed function's config
+   - Revokes the service account credentials from the build agent at the end of the job, whether it succeeded or failed
+
+### One-time setup in Azure DevOps
+
+Before the pipeline can run, configure three things in your Azure DevOps project:
+
+**1. Secure file — the deployment credential**
+
+In *Pipelines → Library → Secure files*, upload your GCP service account key JSON, named exactly `gcp-sa-key.json`. Authorize it for use by this pipeline (or the `production` environment) under its permissions tab.
+
+The service account behind this key needs, at minimum:
+- `roles/run.developer` (or `roles/cloudfunctions.developer`)
+- `roles/iam.serviceAccountUser`
+
+on the target GCP project.
+
+**2. Variable group — deployment configuration**
+
+In *Pipelines → Library → Variable groups*, create a group named `gcp-folder-map-function` with these variables:
+
+| Variable | Description | Example |
+|---|---|---|
+| `GCP_PROJECT_ID` | Target GCP project | `my-gcp-project` |
+| `GCP_REGION` | Deployment region | `europe-west1` |
+| `FUNCTION_NAME` | Cloud Function/Run service name | `folder-map-function` |
+| `RUNTIME` | Python runtime for Gen2 | `python312` |
+| `SHARED_DRIVE_FOLDER` | Folder ID the map file is uploaded to | `1AbCdEfGhIjKlMnOp` |
+| `SHARED_DRIVE_ID` | Shared Drive ID to scan for folders | `0AbCdEfGhIjKlMnOp` |
+
+None of these values are secret (the sensitive part is the key file above), so plain variables are fine.
+
+**3. Environment — deployment history and gates**
+
+In *Pipelines → Environments*, create an environment named `production`. The `Deploy` stage targets this environment, which gives you a deployment history in Azure DevOps and lets you optionally add a manual-approval check before deploys go out.
+
+### Running it
+
+Point an Azure DevOps pipeline at `azure-pipelines.yml` (*Pipelines → New pipeline → Existing YAML file*). From then on:
+
+- Opening a PR into `main` triggers **Validate** only.
+- Merging/pushing to `main` triggers **Validate** then **Deploy**.
+
+To update the deployed environment variables without a code change, edit the variable group and re-run the pipeline — no local `gcloud` needed.
 
 ## Step 1: Prepare Your Code
 

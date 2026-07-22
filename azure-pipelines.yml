@@ -1,0 +1,86 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  - group: gcp-folder-map-function # holds GCP_PROJECT_ID, GCP_REGION, FUNCTION_NAME, RUNTIME, SHARED_DRIVE_FOLDER, SHARED_DRIVE_ID
+
+stages:
+  - stage: Validate
+    displayName: 'Validate'
+    jobs:
+      - job: Lint
+        displayName: 'Install deps & compile check'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.12'
+          - script: |
+              set -e
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt
+              python -m py_compile main.py
+            displayName: 'Install requirements & compile check'
+
+  - stage: Deploy
+    displayName: 'Deploy to Cloud Run'
+    dependsOn: Validate
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployCloudFunction
+        displayName: 'Deploy Cloud Run function'
+        environment: 'production'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: DownloadSecureFile@1
+                  name: gcpKey
+                  displayName: 'Download GCP service account key'
+                  inputs:
+                    secureFile: 'gcp-sa-key.json'
+
+                - script: |
+                    set -e
+                    curl -sSL https://sdk.cloud.google.com > install.sh
+                    bash install.sh --disable-prompts --install-dir=$(Agent.ToolsDirectory)
+                    echo "##vso[task.prependpath]$(Agent.ToolsDirectory)/google-cloud-sdk/bin"
+                  displayName: 'Install gcloud CLI'
+
+                - script: |
+                    set -e
+                    gcloud auth activate-service-account --key-file="$(gcpKey.secureFilePath)"
+                    gcloud config set project "$(GCP_PROJECT_ID)"
+                  displayName: 'Authenticate to GCP'
+
+                - script: |
+                    set -e
+                    gcloud functions deploy "$(FUNCTION_NAME)" \
+                      --gen2 \
+                      --runtime="$(RUNTIME)" \
+                      --region="$(GCP_REGION)" \
+                      --source="$(Build.SourcesDirectory)" \
+                      --entry-point=main \
+                      --trigger-http \
+                      --ingress-settings=internal-only \
+                      --no-allow-unauthenticated \
+                      --set-env-vars="SHARED_DRIVE_FOLDER=$(SHARED_DRIVE_FOLDER),SHARED_DRIVE_ID=$(SHARED_DRIVE_ID)"
+                  displayName: 'Deploy Cloud Run function (Gen2)'
+
+                - script: |
+                    set -e
+                    gcloud auth revoke --all || true
+                  displayName: 'Revoke local gcloud credentials'
+                  condition: always()
